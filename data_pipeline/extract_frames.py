@@ -108,6 +108,9 @@ def main():
     parser.add_argument("--input", required=True, help="Path to a video file or a folder of videos.")
     parser.add_argument("--output_dir", required=True, help="Directory to save extracted frames into.")
     parser.add_argument("--fps", type=float, default=1.0, help="Frames to extract per second of video (default: 1.0).")
+    parser.add_argument("--limit", type=int, default=None,
+                         help="Optional: only process the first N videos found (useful for quick pipeline "
+                              "tests on a new dataset before running the full batch).")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -115,7 +118,11 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     video_paths = collect_video_paths(input_path)
-    logger.info(f"Found {len(video_paths)} video(s) to process.")
+    logger.info(f"Found {len(video_paths)} video(s) total.")
+
+    if args.limit is not None:
+        video_paths = video_paths[:args.limit]
+        logger.info(f"--limit {args.limit} set: processing only {len(video_paths)} video(s).")
 
     total_frames = 0
     failed_videos = []
