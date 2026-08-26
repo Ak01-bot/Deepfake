@@ -1,0 +1,25 @@
+# Data & media - never commit these, they belong in Drive/Colab, not Git
+data/
+frames/
+*.mp4
+*.avi
+*.mov
+*.zip
+
+# Model weights - also too large for Git
+*.pth
+*.pt
+*.safetensors
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Colab/Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
