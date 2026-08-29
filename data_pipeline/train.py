@@ -19,6 +19,7 @@ import timm
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from dataset import FaceDataset, build_dataset_splits, get_eval_transform, get_train_transform
 
@@ -27,23 +28,34 @@ def get_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def build_model(backbone_name: str, device: torch.device) -> nn.Module:
+def build_model(backbone_name: str, device: torch.device, drop_rate: float = 0.3) -> nn.Module:
     """
     Load a pretrained backbone via timm and swap the classifier head
     for 2-class (real/fake) output. This is the transfer-learning setup
     validated in the earlier sanity check (xception/efficientnet_b0/resnet50
     all confirmed loading with pretrained weights and correct output shape).
+
+    drop_rate adds dropout before the final classifier layer — this is
+    a regularization fix, added after the first Xception run showed
+    heavy overfitting (train_acc reached 99.4% while val_acc stayed
+    around 76-79%, never tracking train's improvement).
     """
-    model = timm.create_model(backbone_name, pretrained=True, num_classes=2)
+    model = timm.create_model(backbone_name, pretrained=True, num_classes=2, drop_rate=drop_rate)
     return model.to(device)
 
 
-def run_one_epoch(model, dataloader, criterion, optimizer, device, is_training: bool) -> dict:
+def run_one_epoch(model, dataloader, criterion, optimizer, device, is_training: bool,
+                   phase_name: str = "train") -> dict:
     """
     Run a single pass over the given dataloader.
 
     If is_training is True, this updates model weights (train mode).
     If False, this only evaluates (val/test mode, no gradient updates).
+
+    Prints a live progress bar with running loss/accuracy and batch
+    timing, so a slow epoch is visibly distinguishable from a hung one
+    — previously this function was silent until the whole epoch
+    finished, which made "slow" and "stuck" look identical.
 
     Returns:
         Dict with average loss and accuracy for this pass.
@@ -53,11 +65,16 @@ def run_one_epoch(model, dataloader, criterion, optimizer, device, is_training: 
     total_loss = 0.0
     correct = 0
     total = 0
+    batch_times = []
 
     context = torch.enable_grad() if is_training else torch.no_grad()
 
+    progress_bar = tqdm(dataloader, desc=f"  {phase_name}", unit="batch", leave=False)
+
     with context:
-        for images, labels in dataloader:
+        for images, labels in progress_bar:
+            batch_start = time.time()
+
             images, labels = images.to(device), labels.to(device)
 
             if is_training:
@@ -75,6 +92,17 @@ def run_one_epoch(model, dataloader, criterion, optimizer, device, is_training: 
             correct += (predictions == labels).sum().item()
             total += labels.size(0)
 
+            batch_times.append(time.time() - batch_start)
+            running_loss = total_loss / total
+            running_acc = correct / total
+            avg_batch_time = sum(batch_times) / len(batch_times)
+
+            progress_bar.set_postfix({
+                "loss": f"{running_loss:.4f}",
+                "acc": f"{running_acc:.4f}",
+                "s/batch": f"{avg_batch_time:.2f}",
+            })
+
     return {
         "loss": total_loss / total if total > 0 else 0.0,
         "accuracy": correct / total if total > 0 else 0.0,
@@ -86,13 +114,23 @@ def train_model(
     backbone_name: str = "xception",
     epochs: int = 10,
     batch_size: int = 32,
-    learning_rate: float = 1e-4,
+    learning_rate: float = 5e-5,
+    drop_rate: float = 0.3,
+    early_stopping_patience: int = 3,
     checkpoint_dir: str = "checkpoints",
 ):
     """
     Full training run: builds splits, dataloaders, model, and runs the
     train/val loop for the given number of epochs, saving the best
     checkpoint (by validation accuracy) along the way.
+
+    early_stopping_patience: if val_accuracy doesn't improve for this
+    many consecutive epochs, training stops early rather than running
+    the full epoch count regardless. Added after the first 10-epoch
+    Xception run showed val_acc peaking essentially at epoch 1 and
+    never meaningfully improving again — epochs 2-9 just overfit
+    without adding value, and would have been caught and stopped
+    automatically by this.
     """
     device = get_device()
     print(f"Using device: {device}")
@@ -106,21 +144,40 @@ def train_model(
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
+    print(f"Train batches per epoch: {len(train_loader)} | Val batches per epoch: {len(val_loader)}")
+
     # --- Model, loss, optimizer ---
-    model = build_model(backbone_name, device)
+    model = build_model(backbone_name, device, drop_rate=drop_rate)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_val_accuracy = 0.0
+    epochs_without_improvement = 0
+
+    # --- Quick single-batch timing check ---
+    # Loads just one batch and times it, before committing to a full
+    # epoch. If this is slow (several seconds+), the data loading path
+    # (e.g. reading from a network-mounted Drive) is likely the
+    # bottleneck, not the GPU or the model itself — worth knowing
+    # before waiting through an entire silent epoch to find out.
+    print("Timing a single batch load (sanity check before full training)...")
+    check_start = time.time()
+    first_batch = next(iter(train_loader))
+    load_time = time.time() - check_start
+    print(f"First batch loaded in {load_time:.2f}s "
+          f"({'looks fine' if load_time < 5 else 'this is slow — data loading may be the bottleneck, not the GPU'})")
 
     # --- Epoch loop ---
     for epoch in range(1, epochs + 1):
         start_time = time.time()
 
-        train_metrics = run_one_epoch(model, train_loader, criterion, optimizer, device, is_training=True)
-        val_metrics = run_one_epoch(model, val_loader, criterion, optimizer, device, is_training=False)
+        print(f"Epoch {epoch}/{epochs} starting...")
+        train_metrics = run_one_epoch(model, train_loader, criterion, optimizer, device,
+                                       is_training=True, phase_name="train")
+        val_metrics = run_one_epoch(model, val_loader, criterion, optimizer, device,
+                                     is_training=False, phase_name="val")
 
         elapsed = time.time() - start_time
         print(
@@ -131,9 +188,19 @@ def train_model(
 
         if val_metrics["accuracy"] > best_val_accuracy:
             best_val_accuracy = val_metrics["accuracy"]
+            epochs_without_improvement = 0
             checkpoint_path = checkpoint_dir / f"{backbone_name}_best.pth"
             torch.save(model.state_dict(), checkpoint_path)
             print(f"  New best val accuracy ({best_val_accuracy:.4f}) — saved to {checkpoint_path}")
+        else:
+            epochs_without_improvement += 1
+            print(f"  No improvement for {epochs_without_improvement} epoch(s) "
+                  f"(best so far: {best_val_accuracy:.4f})")
+
+            if epochs_without_improvement >= early_stopping_patience:
+                print(f"\nEarly stopping: val accuracy hasn't improved for "
+                      f"{early_stopping_patience} consecutive epochs. Stopping at epoch {epoch}/{epochs}.")
+                break
 
     print(f"\nTraining done. Best val accuracy: {best_val_accuracy:.4f}")
     return model
@@ -145,7 +212,13 @@ def main():
     parser.add_argument("--backbone", default="xception", help="timm model name (default: xception).")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--learning_rate", type=float, default=5e-5,
+                         help="Lowered from 1e-4 after the first run converged too fast and overfit "
+                              "(train_acc hit 99.4%% while val_acc stayed flat around 76-79%%).")
+    parser.add_argument("--drop_rate", type=float, default=0.3,
+                         help="Dropout before the classifier head, for regularization.")
+    parser.add_argument("--early_stopping_patience", type=int, default=3,
+                         help="Stop if val accuracy doesn't improve for this many consecutive epochs.")
     parser.add_argument("--checkpoint_dir", default="checkpoints")
     args = parser.parse_args()
 
@@ -155,6 +228,8 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        drop_rate=args.drop_rate,
+        early_stopping_patience=args.early_stopping_patience,
         checkpoint_dir=args.checkpoint_dir,
     )
 
