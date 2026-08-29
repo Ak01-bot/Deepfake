@@ -24,6 +24,7 @@ from pathlib import Path
 import torch
 from facenet_pytorch import MTCNN
 from PIL import Image
+from tqdm import tqdm
 
 logging.basicConfig(
     level=logging.INFO,
@@ -158,7 +159,6 @@ def process_video_folder(video_frames_dir: Path, output_dir: Path, mtcnn: MTCNN)
         face_image.save(output_path)
         kept += 1
 
-    logger.info(f"{video_name}: kept {kept}, discarded {discarded} (no valid face)")
     return {"video_name": video_name, "kept": kept, "discarded": discarded}
 
 
@@ -187,10 +187,12 @@ def main():
     total_kept = 0
     total_discarded = 0
 
-    for video_folder in video_folders:
+    progress_bar = tqdm(video_folders, desc="Aligning faces", unit="video")
+    for video_folder in progress_bar:
         result = process_video_folder(video_folder, output_dir, mtcnn)
         total_kept += result["kept"]
         total_discarded += result["discarded"]
+        progress_bar.set_postfix({"kept": total_kept, "discarded": total_discarded})
 
     logger.info(
         f"Done. Total faces kept: {total_kept}, total frames discarded (no valid face): {total_discarded}"

@@ -21,6 +21,7 @@ import logging
 from pathlib import Path
 
 import cv2
+from tqdm import tqdm
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,7 +81,6 @@ def extract_frames_from_video(video_path: Path, output_dir: Path, target_fps: fl
         frame_index += 1
 
     cap.release()
-    logger.info(f"{video_path.name}: extracted {saved_count} frames -> {video_output_dir}")
     return saved_count
 
 
@@ -127,12 +127,14 @@ def main():
     total_frames = 0
     failed_videos = []
 
-    for video_path in video_paths:
+    progress_bar = tqdm(video_paths, desc="Extracting frames", unit="video")
+    for video_path in progress_bar:
         try:
             count = extract_frames_from_video(video_path, output_dir, args.fps)
             if count == 0:
                 failed_videos.append(video_path.name)
             total_frames += count
+            progress_bar.set_postfix({"frames_so_far": total_frames})
         except Exception as e:
             logger.error(f"Failed on {video_path.name}: {e}")
             failed_videos.append(video_path.name)
