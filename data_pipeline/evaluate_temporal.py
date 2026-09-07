@@ -10,6 +10,11 @@ performance — val_acc during training is useful for tracking progress
 and picking the best checkpoint, but the test set is what confirms
 the model generalizes to genuinely unseen data.
 
+IMPORTANT: the --lstm_hidden_size / --lstm_num_layers / --rnn_hidden_size
+/ --rnn_num_layers flags here must match whatever the checkpoint was
+actually trained with (train_temporal.py's flags of the same name),
+or loading the checkpoint's weights will fail/mismatch.
+
 Usage:
     python evaluate_temporal.py --embeddings_root embeddings --checkpoint checkpoints/temporal_fusion_best.pth
 """
@@ -34,7 +39,15 @@ def infer_embedding_dim(sample_path) -> int:
     return sample.shape[1]
 
 
-def evaluate(embeddings_root: str, checkpoint_path: str, batch_size: int = 16):
+def evaluate(
+    embeddings_root: str,
+    checkpoint_path: str,
+    batch_size: int = 16,
+    lstm_hidden_size: int = 256,
+    lstm_num_layers: int = 2,
+    rnn_hidden_size: int = 128,
+    rnn_num_layers: int = 1,
+):
     device = get_device()
     print(f"Using device: {device}")
 
@@ -51,7 +64,13 @@ def evaluate(embeddings_root: str, checkpoint_path: str, batch_size: int = 16):
         collate_fn=collate_sequences, num_workers=2
     )
 
-    model = TemporalFusionModel(embedding_dim=embedding_dim).to(device)
+    model = TemporalFusionModel(
+        embedding_dim=embedding_dim,
+        lstm_hidden_size=lstm_hidden_size,
+        lstm_num_layers=lstm_num_layers,
+        rnn_hidden_size=rnn_hidden_size,
+        rnn_num_layers=rnn_num_layers,
+    ).to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
 
@@ -102,9 +121,19 @@ def main():
     parser.add_argument("--embeddings_root", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--lstm_hidden_size", type=int, default=256)
+    parser.add_argument("--lstm_num_layers", type=int, default=2)
+    parser.add_argument("--rnn_hidden_size", type=int, default=128)
+    parser.add_argument("--rnn_num_layers", type=int, default=1)
     args = parser.parse_args()
 
-    evaluate(args.embeddings_root, args.checkpoint, args.batch_size)
+    evaluate(
+        args.embeddings_root, args.checkpoint, args.batch_size,
+        lstm_hidden_size=args.lstm_hidden_size,
+        lstm_num_layers=args.lstm_num_layers,
+        rnn_hidden_size=args.rnn_hidden_size,
+        rnn_num_layers=args.rnn_num_layers,
+    )
 
 
 if __name__ == "__main__":

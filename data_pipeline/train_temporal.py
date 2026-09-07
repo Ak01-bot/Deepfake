@@ -15,9 +15,11 @@ import argparse
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from sequence_dataset import VideoSequenceDataset, build_sequence_splits, collate_sequences
 from temporal_model import TemporalFusionModel
@@ -29,15 +31,11 @@ def get_device() -> torch.device:
 
 def infer_embedding_dim(sample_path: Path) -> int:
     """Peek at one cached embedding file to determine the feature dimension automatically."""
-    import numpy as np
     sample = np.load(sample_path)
     return sample.shape[1]
 
 
 def run_one_epoch(model, dataloader, criterion, optimizer, device, is_training: bool, phase_name: str) -> dict:
-    """Same pattern as train.py's run_one_epoch, adapted for the (sequence, seq_len, label) batch shape."""
-    from tqdm import tqdm
-
     model.train() if is_training else model.eval()
 
     total_loss = 0.0
@@ -84,19 +82,24 @@ def train_temporal_model(
     learning_rate: float = 1e-4,
     dropout: float = 0.4,
     early_stopping_patience: int = 5,
+    lstm_hidden_size: int = 256,
+    lstm_num_layers: int = 2,
+    rnn_hidden_size: int = 128,
+    rnn_num_layers: int = 1,
     checkpoint_dir: str = "checkpoints",
+    checkpoint_name: str = "temporal_fusion_best.pth",
 ):
     """
     Full training run for the LSTM+RNN fusion model.
 
-    Note: learning_rate default (1e-4) and dropout (0.4) reflect the
-    winning combination from hyperparameter tuning — tested against
-    the original defaults (lr=5e-4, dropout=0.3) and a second variation
-    (lr=5e-4, dropout=0.5), this combination won on test accuracy
-    (85.45% vs 81.82% baseline), recall (94.32% vs 86.36%), F1, and
-    AUC-ROC. This model trains fully from scratch (unlike the
-    pretrained CNN backbones), which is why the rate is still higher
-    than train.py's CNN fine-tuning rate (5e-5).
+    lstm_hidden_size / lstm_num_layers / rnn_hidden_size / rnn_num_layers
+    expose the architecture's capacity for tuning — added after the
+    baseline runs to let this be experimented with cheaply (each run
+    is ~1s/epoch) without editing code each time.
+
+    checkpoint_name lets each architecture variation save to its own
+    file, so trying a bigger LSTM doesn't silently overwrite a smaller
+    one you might still want to compare against.
     """
     device = get_device()
     print(f"Using device: {device}")
@@ -111,6 +114,8 @@ def train_temporal_model(
 
     embedding_dim = infer_embedding_dim(train_samples[0][0])
     print(f"Detected embedding dimension: {embedding_dim}")
+    print(f"Architecture: LSTM(hidden={lstm_hidden_size}, layers={lstm_num_layers}) "
+          f"+ RNN(hidden={rnn_hidden_size}, layers={rnn_num_layers})")
 
     train_dataset = VideoSequenceDataset(train_samples)
     val_dataset = VideoSequenceDataset(val_samples)
@@ -126,7 +131,14 @@ def train_temporal_model(
 
     print(f"Train batches per epoch: {len(train_loader)} | Val batches per epoch: {len(val_loader)}")
 
-    model = TemporalFusionModel(embedding_dim=embedding_dim, dropout=dropout).to(device)
+    model = TemporalFusionModel(
+        embedding_dim=embedding_dim,
+        lstm_hidden_size=lstm_hidden_size,
+        lstm_num_layers=lstm_num_layers,
+        rnn_hidden_size=rnn_hidden_size,
+        rnn_num_layers=rnn_num_layers,
+        dropout=dropout,
+    ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -152,7 +164,7 @@ def train_temporal_model(
         if val_metrics["accuracy"] > best_val_accuracy:
             best_val_accuracy = val_metrics["accuracy"]
             epochs_without_improvement = 0
-            checkpoint_path = checkpoint_dir / "temporal_fusion_best.pth"
+            checkpoint_path = checkpoint_dir / checkpoint_name
             torch.save(model.state_dict(), checkpoint_path)
             print(f"  New best val accuracy ({best_val_accuracy:.4f}) — saved to {checkpoint_path}")
         else:
@@ -175,7 +187,15 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--dropout", type=float, default=0.4)
     parser.add_argument("--early_stopping_patience", type=int, default=5)
+    parser.add_argument("--lstm_hidden_size", type=int, default=256)
+    parser.add_argument("--lstm_num_layers", type=int, default=2)
+    parser.add_argument("--rnn_hidden_size", type=int, default=128)
+    parser.add_argument("--rnn_num_layers", type=int, default=1)
     parser.add_argument("--checkpoint_dir", default="checkpoints")
+    parser.add_argument("--checkpoint_name", default="temporal_fusion_best.pth",
+                         help="Filename to save this run's best checkpoint as — give each "
+                              "architecture variation a distinct name so you can compare "
+                              "multiple saved checkpoints rather than overwriting one.")
     args = parser.parse_args()
 
     train_temporal_model(
@@ -185,7 +205,12 @@ def main():
         learning_rate=args.learning_rate,
         dropout=args.dropout,
         early_stopping_patience=args.early_stopping_patience,
+        lstm_hidden_size=args.lstm_hidden_size,
+        lstm_num_layers=args.lstm_num_layers,
+        rnn_hidden_size=args.rnn_hidden_size,
+        rnn_num_layers=args.rnn_num_layers,
         checkpoint_dir=args.checkpoint_dir,
+        checkpoint_name=args.checkpoint_name,
     )
 
 
