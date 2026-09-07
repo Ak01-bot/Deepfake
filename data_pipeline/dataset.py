@@ -55,38 +55,22 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 def get_train_transform():
-    """
-    Augmentation for training.
+    """Light augmentation for training: helps the model generalize
+    rather than memorize specific frames.
 
-    STRENGTHENED (polishing Step 3) from the original light version
-    (just a horizontal flip + mild color jitter). The original CNN
-    runs showed heavy overfitting (train_acc reaching ~98-100% while
-    val_acc plateaued far lower), so this version pushes harder on
-    every axis to make memorizing the exact training frames less
-    viable, forcing the model to rely on more general, robust cues:
-
-      - RandomResizedCrop instead of a plain Resize: forces the model
-        to recognize faces from partial/zoomed-in views, not just the
-        exact framing MTCNN produced.
-      - Wider rotation range: real-world face angles vary; this
-        prevents over-fitting to a fixed orientation.
-      - Stronger color jitter (brightness/contrast/saturation/hue):
-        counters overfitting to this dataset's specific lighting/color
-        characteristics from FaceForensics++'s particular encoding.
-      - RandomErasing (cutout-style): randomly blacks out a small
-        rectangular region per image, forcing the model to not rely
-        on any single facial region always being visible — directly
-        useful for a deepfake detector, since it discourages fixating
-        on one artifact location.
+    NOTE: a stronger augmentation variant (RandomResizedCrop, wider
+    rotation, stronger color jitter, RandomErasing) was tested as
+    polishing Step 3 and found to REDUCE downstream temporal model
+    accuracy (test Acc 88.44% -> 86.22%, F1 93.09% -> 91.55%, AUC
+    94.62% -> 92.00%). Reverted back to this lighter version, which
+    produced the project's best result to date.
     """
     return transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+        transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(degrees=15),
-        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        transforms.RandomErasing(p=0.2, scale=(0.02, 0.1)),
     ])
 
 
