@@ -45,7 +45,7 @@ def evaluate(
     batch_size: int = 16,
     lstm_hidden_size: int = 256,
     lstm_num_layers: int = 2,
-    rnn_hidden_size: int = 128,
+    rnn_hidden_size: int = 256,
     rnn_num_layers: int = 1,
 ):
     device = get_device()
@@ -123,7 +123,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lstm_hidden_size", type=int, default=256)
     parser.add_argument("--lstm_num_layers", type=int, default=2)
-    parser.add_argument("--rnn_hidden_size", type=int, default=128)
+    parser.add_argument("--rnn_hidden_size", type=int, default=256)
     parser.add_argument("--rnn_num_layers", type=int, default=1)
     args = parser.parse_args()
 
