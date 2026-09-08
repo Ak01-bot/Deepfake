@@ -2,13 +2,14 @@
 train_temporal.py
 
 Training loop for the LSTM+RNN temporal fusion model, operating on
-cached CNN embeddings (from extract_embeddings.py) rather than raw
-frames — this is what makes each epoch fast despite the added
-architectural complexity, since Xception's expensive forward pass
-already happened once during caching, not on every epoch here.
+cached CNN embeddings (from extract_embeddings.py).
 
 Usage:
     python train_temporal.py --embeddings_root embeddings --epochs 15
+
+Resume from an interrupted run:
+    python train_temporal.py --embeddings_root embeddings --epochs 15 \\
+        --resume_from checkpoints/temporal_fusion_best.pth --initial_best_accuracy 0.89
 """
 
 import argparse
@@ -30,7 +31,6 @@ def get_device() -> torch.device:
 
 
 def infer_embedding_dim(sample_path: Path) -> int:
-    """Peek at one cached embedding file to determine the feature dimension automatically."""
     sample = np.load(sample_path)
     return sample.shape[1]
 
@@ -88,18 +88,18 @@ def train_temporal_model(
     rnn_num_layers: int = 1,
     checkpoint_dir: str = "checkpoints",
     checkpoint_name: str = "temporal_fusion_best.pth",
+    resume_from: str = None,
+    initial_best_accuracy: float = 0.0,
 ):
     """
     Full training run for the LSTM+RNN fusion model.
 
-    lstm_hidden_size / lstm_num_layers / rnn_hidden_size / rnn_num_layers
-    expose the architecture's capacity for tuning — added after the
-    baseline runs to let this be experimented with cheaply (each run
-    is ~1s/epoch) without editing code each time.
-
-    checkpoint_name lets each architecture variation save to its own
-    file, so trying a bigger LSTM doesn't silently overwrite a smaller
-    one you might still want to compare against.
+    resume_from / initial_best_accuracy: same resume pattern as
+    train.py — loads existing weights rather than starting from
+    scratch, and seeds best_val_accuracy so early stopping/checkpoint
+    logic compares against the real prior best rather than 0.0.
+    Model architecture flags (lstm_hidden_size etc.) must match
+    whatever the checkpoint being resumed was originally trained with.
     """
     device = get_device()
     print(f"Using device: {device}")
@@ -139,13 +139,24 @@ def train_temporal_model(
         rnn_num_layers=rnn_num_layers,
         dropout=dropout,
     ).to(device)
+
+    if resume_from:
+        resume_path = Path(resume_from)
+        if resume_path.exists():
+            model.load_state_dict(torch.load(resume_path, map_location=device))
+            print(f"Resumed weights from {resume_path}")
+        else:
+            print(f"Warning: --resume_from path not found ({resume_path}), starting fresh instead.")
+
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    best_val_accuracy = 0.0
+    best_val_accuracy = initial_best_accuracy
     epochs_without_improvement = 0
+    if initial_best_accuracy > 0:
+        print(f"Starting from initial_best_accuracy={initial_best_accuracy:.4f}")
 
     for epoch in range(1, epochs + 1):
         start_time = time.time()
@@ -191,14 +202,17 @@ def main():
     parser.add_argument("--lstm_num_layers", type=int, default=2)
     parser.add_argument("--rnn_hidden_size", type=int, default=256,
                          help="Default changed from 128 to 256 after tuning — this was the single "
-                              "most effective architecture change tested (Acc 87.56%%->89.33%%, "
-                              "F1 92.55%%->93.68%%).")
+                              "most effective architecture change tested.")
     parser.add_argument("--rnn_num_layers", type=int, default=1)
     parser.add_argument("--checkpoint_dir", default="checkpoints")
     parser.add_argument("--checkpoint_name", default="temporal_fusion_best.pth",
                          help="Filename to save this run's best checkpoint as — give each "
                               "architecture variation a distinct name so you can compare "
                               "multiple saved checkpoints rather than overwriting one.")
+    parser.add_argument("--resume_from", default=None,
+                         help="Path to an existing checkpoint to resume training from.")
+    parser.add_argument("--initial_best_accuracy", type=float, default=0.0,
+                         help="Val accuracy the resumed checkpoint already achieved.")
     args = parser.parse_args()
 
     train_temporal_model(
@@ -214,6 +228,8 @@ def main():
         rnn_num_layers=args.rnn_num_layers,
         checkpoint_dir=args.checkpoint_dir,
         checkpoint_name=args.checkpoint_name,
+        resume_from=args.resume_from,
+        initial_best_accuracy=args.initial_best_accuracy,
     )
 
 

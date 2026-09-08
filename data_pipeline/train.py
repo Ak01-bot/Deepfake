@@ -1,14 +1,16 @@
 """
 train.py
 
-Training loop skeleton for fine-tuning a pretrained CNN backbone
-(starting with Xception) for real/fake binary classification.
-
-This is written and syntax-checked so Week 2 starts on actually running
-and tuning training, not on writing this infrastructure from scratch.
+Training loop for fine-tuning a pretrained CNN backbone (Xception/
+EfficientNet/ResNet) for real/fake binary classification.
 
 Usage:
     python train.py --faces_root faces --backbone xception --epochs 10
+
+Resume from an interrupted run (e.g. a Kaggle/Colab quota cutoff or
+session reset mid-training):
+    python train.py --faces_root faces --backbone xception --epochs 10 \\
+        --resume_from checkpoints/xception_best.pth --initial_best_accuracy 0.87
 """
 
 import argparse
@@ -31,14 +33,7 @@ def get_device() -> torch.device:
 def build_model(backbone_name: str, device: torch.device, drop_rate: float = 0.3) -> nn.Module:
     """
     Load a pretrained backbone via timm and swap the classifier head
-    for 2-class (real/fake) output. This is the transfer-learning setup
-    validated in the earlier sanity check (xception/efficientnet_b0/resnet50
-    all confirmed loading with pretrained weights and correct output shape).
-
-    drop_rate adds dropout before the final classifier layer — this is
-    a regularization fix, added after the first Xception run showed
-    heavy overfitting (train_acc reached 99.4% while val_acc stayed
-    around 76-79%, never tracking train's improvement).
+    for 2-class (real/fake) output.
     """
     model = timm.create_model(backbone_name, pretrained=True, num_classes=2, drop_rate=drop_rate)
     return model.to(device)
@@ -46,20 +41,6 @@ def build_model(backbone_name: str, device: torch.device, drop_rate: float = 0.3
 
 def run_one_epoch(model, dataloader, criterion, optimizer, device, is_training: bool,
                    phase_name: str = "train") -> dict:
-    """
-    Run a single pass over the given dataloader.
-
-    If is_training is True, this updates model weights (train mode).
-    If False, this only evaluates (val/test mode, no gradient updates).
-
-    Prints a live progress bar with running loss/accuracy and batch
-    timing, so a slow epoch is visibly distinguishable from a hung one
-    — previously this function was silent until the whole epoch
-    finished, which made "slow" and "stuck" look identical.
-
-    Returns:
-        Dict with average loss and accuracy for this pass.
-    """
     model.train() if is_training else model.eval()
 
     total_loss = 0.0
@@ -68,13 +49,11 @@ def run_one_epoch(model, dataloader, criterion, optimizer, device, is_training: 
     batch_times = []
 
     context = torch.enable_grad() if is_training else torch.no_grad()
-
     progress_bar = tqdm(dataloader, desc=f"  {phase_name}", unit="batch", leave=False)
 
     with context:
         for images, labels in progress_bar:
             batch_start = time.time()
-
             images, labels = images.to(device), labels.to(device)
 
             if is_training:
@@ -118,19 +97,33 @@ def train_model(
     drop_rate: float = 0.3,
     early_stopping_patience: int = 3,
     checkpoint_dir: str = "checkpoints",
+    resume_from: str = None,
+    initial_best_accuracy: float = 0.0,
 ):
     """
     Full training run: builds splits, dataloaders, model, and runs the
-    train/val loop for the given number of epochs, saving the best
-    checkpoint (by validation accuracy) along the way.
+    train/val loop, saving the best checkpoint (by validation accuracy)
+    along the way.
 
-    early_stopping_patience: if val_accuracy doesn't improve for this
-    many consecutive epochs, training stops early rather than running
-    the full epoch count regardless. Added after the first 10-epoch
-    Xception run showed val_acc peaking essentially at epoch 1 and
-    never meaningfully improving again — epochs 2-9 just overfit
-    without adding value, and would have been caught and stopped
-    automatically by this.
+    resume_from: optional path to an existing checkpoint (.pth) to load
+    weights from before training starts. Added after repeatedly losing
+    checkpoints to Kaggle/Colab session resets mid-project — lets a new
+    session continue fine-tuning from a previously trained state instead
+    of starting from the pretrained backbone's original weights.
+
+    initial_best_accuracy: when resuming, pass the val accuracy the
+    resumed checkpoint already achieved, so early stopping and "new
+    best" logic compare against the real prior best rather than 0.0
+    (which would make the very first epoch after resume look like an
+    improvement even if it's actually worse than what you resumed from).
+
+    Note: this resumes MODEL WEIGHTS only, not optimizer state (momentum,
+    etc.) — the optimizer restarts fresh. For fine-tuning a few more
+    epochs this is a reasonable simplification; it means the first
+    resumed epoch may behave slightly differently than a true
+    uninterrupted continuation, but avoids the extra complexity of
+    saving/loading full training state for what is normally a short
+    fine-tuning run.
     """
     device = get_device()
     print(f"Using device: {device}")
@@ -148,20 +141,27 @@ def train_model(
 
     # --- Model, loss, optimizer ---
     model = build_model(backbone_name, device, drop_rate=drop_rate)
+
+    if resume_from:
+        resume_path = Path(resume_from)
+        if resume_path.exists():
+            model.load_state_dict(torch.load(resume_path, map_location=device))
+            print(f"Resumed weights from {resume_path}")
+        else:
+            print(f"Warning: --resume_from path not found ({resume_path}), starting from pretrained weights instead.")
+
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    best_val_accuracy = 0.0
+    best_val_accuracy = initial_best_accuracy
     epochs_without_improvement = 0
+    if initial_best_accuracy > 0:
+        print(f"Starting from initial_best_accuracy={initial_best_accuracy:.4f} "
+              f"(only strictly better epochs will be saved as a new best).")
 
     # --- Quick single-batch timing check ---
-    # Loads just one batch and times it, before committing to a full
-    # epoch. If this is slow (several seconds+), the data loading path
-    # (e.g. reading from a network-mounted Drive) is likely the
-    # bottleneck, not the GPU or the model itself — worth knowing
-    # before waiting through an entire silent epoch to find out.
     print("Timing a single batch load (sanity check before full training)...")
     check_start = time.time()
     first_batch = next(iter(train_loader))
@@ -194,8 +194,7 @@ def train_model(
             print(f"  New best val accuracy ({best_val_accuracy:.4f}) — saved to {checkpoint_path}")
         else:
             epochs_without_improvement += 1
-            print(f"  No improvement for {epochs_without_improvement} epoch(s) "
-                  f"(best so far: {best_val_accuracy:.4f})")
+            print(f"  No improvement for {epochs_without_improvement} epoch(s) (best so far: {best_val_accuracy:.4f})")
 
             if epochs_without_improvement >= early_stopping_patience:
                 print(f"\nEarly stopping: val accuracy hasn't improved for "
@@ -212,14 +211,16 @@ def main():
     parser.add_argument("--backbone", default="xception", help="timm model name (default: xception).")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--learning_rate", type=float, default=5e-5,
-                         help="Lowered from 1e-4 after the first run converged too fast and overfit "
-                              "(train_acc hit 99.4%% while val_acc stayed flat around 76-79%%).")
-    parser.add_argument("--drop_rate", type=float, default=0.3,
-                         help="Dropout before the classifier head, for regularization.")
-    parser.add_argument("--early_stopping_patience", type=int, default=3,
-                         help="Stop if val accuracy doesn't improve for this many consecutive epochs.")
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--drop_rate", type=float, default=0.3)
+    parser.add_argument("--early_stopping_patience", type=int, default=3)
     parser.add_argument("--checkpoint_dir", default="checkpoints")
+    parser.add_argument("--resume_from", default=None,
+                         help="Path to an existing checkpoint to resume training from, instead of "
+                              "starting from the pretrained backbone's original weights.")
+    parser.add_argument("--initial_best_accuracy", type=float, default=0.0,
+                         help="Val accuracy the resumed checkpoint already achieved, so early "
+                              "stopping/best-checkpoint logic compares correctly.")
     args = parser.parse_args()
 
     train_model(
@@ -231,6 +232,8 @@ def main():
         drop_rate=args.drop_rate,
         early_stopping_patience=args.early_stopping_patience,
         checkpoint_dir=args.checkpoint_dir,
+        resume_from=args.resume_from,
+        initial_best_accuracy=args.initial_best_accuracy,
     )
 
 
