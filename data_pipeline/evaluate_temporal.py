@@ -27,7 +27,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from torch.utils.data import DataLoader
 
 from sequence_dataset import VideoSequenceDataset, build_sequence_splits, collate_sequences
-from temporal_model import TemporalFusionModel
+from temporal_model import TemporalFusionModel, TemporalFusionAttentionModel
 
 
 def get_device() -> torch.device:
@@ -47,6 +47,7 @@ def evaluate(
     lstm_num_layers: int = 2,
     rnn_hidden_size: int = 256,
     rnn_num_layers: int = 1,
+    use_attention: bool = False,
 ):
     device = get_device()
     print(f"Using device: {device}")
@@ -64,7 +65,8 @@ def evaluate(
         collate_fn=collate_sequences, num_workers=2
     )
 
-    model = TemporalFusionModel(
+    ModelClass = TemporalFusionAttentionModel if use_attention else TemporalFusionModel
+    model = ModelClass(
         embedding_dim=embedding_dim,
         lstm_hidden_size=lstm_hidden_size,
         lstm_num_layers=lstm_num_layers,
@@ -125,6 +127,8 @@ def main():
     parser.add_argument("--lstm_num_layers", type=int, default=2)
     parser.add_argument("--rnn_hidden_size", type=int, default=256)
     parser.add_argument("--rnn_num_layers", type=int, default=1)
+    parser.add_argument("--use_attention", action="store_true",
+                         help="Must match whether the checkpoint was trained with --use_attention.")
     args = parser.parse_args()
 
     evaluate(
@@ -133,6 +137,7 @@ def main():
         lstm_num_layers=args.lstm_num_layers,
         rnn_hidden_size=args.rnn_hidden_size,
         rnn_num_layers=args.rnn_num_layers,
+        use_attention=args.use_attention,
     )
 
 

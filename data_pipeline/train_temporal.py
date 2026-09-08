@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from sequence_dataset import VideoSequenceDataset, build_sequence_splits, collate_sequences
-from temporal_model import TemporalFusionModel
+from temporal_model import TemporalFusionModel, TemporalFusionAttentionModel
 
 
 def get_device() -> torch.device:
@@ -90,6 +90,7 @@ def train_temporal_model(
     checkpoint_name: str = "temporal_fusion_best.pth",
     resume_from: str = None,
     initial_best_accuracy: float = 0.0,
+    use_attention: bool = False,
 ):
     """
     Full training run for the LSTM+RNN fusion model.
@@ -115,7 +116,8 @@ def train_temporal_model(
     embedding_dim = infer_embedding_dim(train_samples[0][0])
     print(f"Detected embedding dimension: {embedding_dim}")
     print(f"Architecture: LSTM(hidden={lstm_hidden_size}, layers={lstm_num_layers}) "
-          f"+ RNN(hidden={rnn_hidden_size}, layers={rnn_num_layers})")
+          f"+ RNN(hidden={rnn_hidden_size}, layers={rnn_num_layers}) "
+          f"[{'attention pooling' if use_attention else 'final hidden state'}]")
 
     train_dataset = VideoSequenceDataset(train_samples)
     val_dataset = VideoSequenceDataset(val_samples)
@@ -131,7 +133,8 @@ def train_temporal_model(
 
     print(f"Train batches per epoch: {len(train_loader)} | Val batches per epoch: {len(val_loader)}")
 
-    model = TemporalFusionModel(
+    ModelClass = TemporalFusionAttentionModel if use_attention else TemporalFusionModel
+    model = ModelClass(
         embedding_dim=embedding_dim,
         lstm_hidden_size=lstm_hidden_size,
         lstm_num_layers=lstm_num_layers,
@@ -213,6 +216,11 @@ def main():
                          help="Path to an existing checkpoint to resume training from.")
     parser.add_argument("--initial_best_accuracy", type=float, default=0.0,
                          help="Val accuracy the resumed checkpoint already achieved.")
+    parser.add_argument("--use_attention", action="store_true",
+                         help="Use attention pooling over all timesteps instead of just the "
+                              "final hidden state (TemporalFusionAttentionModel instead of "
+                              "TemporalFusionModel). This is an enhancement beyond the project "
+                              "doc's original architecture spec.")
     args = parser.parse_args()
 
     train_temporal_model(
@@ -230,6 +238,7 @@ def main():
         checkpoint_name=args.checkpoint_name,
         resume_from=args.resume_from,
         initial_best_accuracy=args.initial_best_accuracy,
+        use_attention=args.use_attention,
     )
 
 
