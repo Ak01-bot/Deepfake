@@ -140,11 +140,30 @@ def predict_video(
 
         aligned_faces = []
         discarded = 0
+        aligned_faces_dir = temp_dir / "aligned_faces"
+        aligned_faces_dir.mkdir()
+
         for frame_path in frame_paths:
             face_image = align_face_in_image(frame_path, mtcnn)
             if face_image is None:
                 discarded += 1
                 continue
+
+            # IMPORTANT: save to JPEG and reload, rather than using the
+            # in-memory PIL image directly. This matches the training
+            # pipeline exactly — mtcnn_align.py saves aligned faces to
+            # disk as JPEG, and the training Dataset loads them back
+            # from disk, so every training image went through one JPEG
+            # compression pass. Skipping this step here caused a real
+            # train/inference mismatch (JPEG compression alters pixel
+            # values slightly), which was traced to a live video
+            # ("original/437") being misclassified by predict.py despite
+            # the exact same frames, loaded from the JPEG files the
+            # training pipeline actually produced, classifying correctly.
+            temp_face_path = aligned_faces_dir / frame_path.name
+            face_image.save(temp_face_path)
+            face_image = Image.open(temp_face_path).convert("RGB")
+
             aligned_faces.append(face_image)
 
         if not aligned_faces:
